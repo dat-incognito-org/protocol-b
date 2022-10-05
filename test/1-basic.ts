@@ -5,16 +5,16 @@ import { ethers } from "hardhat";
 
 describe("Stake & Unstake by single relayer", function() {
     async function deployFixture() {
-        const [deployer, otherAccount] = await ethers.getSigners();
+        const [deployer, relayer] = await ethers.getSigners();
 
         const MainContract = await ethers.getContractFactory("Main");
         const mainContract = await MainContract.deploy();
 
-        return { mainContract, deployer, otherAccount };
+        return { mainContract, deployer, relayer };
     }
 
     describe("Deployment", function() {
-        it("Should set the right unmainContractTime", async function() {
+        it("Should deploy new contract", async function() {
             const { mainContract } = await loadFixture(deployFixture);
 
             expect(await ethers.provider.getBalance(mainContract.address)).to.equal(0);
@@ -32,11 +32,11 @@ describe("Stake & Unstake by single relayer", function() {
 
     describe("Stake", function() {
         it("Should accept stake from new relayer", async function() {
-            const { mainContract } = await loadFixture(deployFixture);
+            const { mainContract, relayer: rel } = await loadFixture(deployFixture);
             const amt = ethers.utils.parseUnits('3', 'ether');
-            await expect(mainContract.stake({ value: amt }))
+            await expect(mainContract.connect(rel).stake(0, amt, [1], { value: amt }))
             .to.emit(mainContract, "Stake")
-            .withArgs(amt);
+            .withArgs(rel.address, amt, [1]);
         });
     });
 });
