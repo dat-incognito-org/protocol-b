@@ -2,17 +2,17 @@
 pragma solidity ^0.8.9;
 
 interface IMain {
-    function stake(MainStructs.NetworkRoles nwrole, uint amount, address token, MainStructs.Networks[] calldata networks) external payable;
-    function unstake(MainStructs.NetworkRoles nwrole, address token) external;
+    function stake(MainStructs.Route[] memory routes, uint[] memory amount, address token) external payable;
+    function unstake(MainStructs.Route memory r, uint amount, address token) external;
     function swap(uint amount, address relayer, MainStructs.Networks dstNetwork, MainStructs.ExecutableMessage calldata srcMsg, MainStructs.ExecutableMessage calldata dstMsg) external payable;
     function fulfill(MainStructs.SwapData calldata swapData, bytes calldata boltOperatorAddr) external payable;
     function relay(MainStructs.SwapTranscript calldata swapData, bytes calldata signature, bool serving) external payable;
     function relayReturn(bytes32 swapDataHash, address boltOperator, bytes calldata signature) external;
     function slash(bytes[2] calldata signatures, MainStructs.SwapTranscript calldata ts) external;
-    function getEligibleRelayers(uint amount, address token) external view returns (MainStructs.BoltRelayer[] memory);
+    function getAvailableRelayers(uint amount, address token) external view returns (address[] memory);
 
-    event Stake(address relayer, uint amount, address token, MainStructs.Networks[] networks);
-    event Unstake(address relayer, uint amount, address token, MainStructs.Networks[] networks);
+    event Stake(address relayer, MainStructs.Route[] routes, uint[] amount, address token);
+    event Unstake(address relayer, MainStructs.Route route, uint amount, address token);
 
 }
 
@@ -38,7 +38,7 @@ abstract contract MainStructs {
     enum SlashRules {
         RULE1,
         RULE2,
-        RULE3,
+        RULE3
     }
 
     enum Status {
@@ -47,6 +47,11 @@ abstract contract MainStructs {
         FULFILLED,
         COMPLETED,
         REFUNDED
+    }
+
+    enum StakeLockTypes {
+        SWAP_LOCK,
+        UNSTAKE
     }
 
     struct Route {
@@ -80,16 +85,21 @@ abstract contract MainStructs {
         uint amount;
         uint until;
         bytes32 h; // the swap ID this is locked for
+        StakeLockTypes lockType;
     }
 
     struct StakedFunds {
-        uint stakedAmount;
+        uint amount;
         LockedFunds[] locked;
-        Networks[] networks;
+    }
+
+    struct MultiTokenStakedFunds {
+        mapping (address => StakedFunds) stake;
     }
 
     struct BoltRelayer {
-        mapping (uint => StakedFunds) stake;
+        mapping (uint => MultiTokenStakedFunds) stakeMap;
+        uint unstakeEnableBlock;
         bytes[] extraAddresses; // placeholder
     }
 }

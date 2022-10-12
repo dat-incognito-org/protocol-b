@@ -2,6 +2,8 @@
 pragma solidity ^0.8.9;
 
 import "./IMain.sol";
+import "./Parameters.sol";
+import "@uniswap/v3-periphery/contracts/libraries/TransferHelper.sol";
 // import "hardhat/console.sol";
 
 /// @title Main logic contract for Bolt Protocol
@@ -9,13 +11,15 @@ contract Main is IMain, MainStructs {
     Networks public immutable CURRENT_NETWORK;
     address public constant NATIVE_TOKEN_ADDRESS = 0x0000000000000000000000000000000000000000;
     address public immutable NATIVE_WRAPPED_TOKEN;
+    Parameters public immutable params; 
 
-    mapping (address => Relayer) public boltRelayers;
+    mapping (address => BoltRelayer) public boltRelayers;
     mapping (bytes32 => SwapData) public swaps;
 
-    constructor(address _wrapped, address _net) {
+    constructor(address _wrapped, Networks _net, address _params) {
         NATIVE_WRAPPED_TOKEN = _wrapped;
         CURRENT_NETWORK = _net;
+        params = Parameters(_params);
     }
 
     /// @notice Any relayer can add stake to take swap requests & earn fees;
@@ -23,55 +27,67 @@ contract Main is IMain, MainStructs {
     /// @param routes Routes to stake funds to e.g. [(ETH, PLG), (ETH, AVAX)]
     /// @param amounts The amount to stake for each route
     /// @param token The token to stake (zero for native coin)
-    function stake(Route[] routes, uint[] amounts, address token) external payable {
-        StakedFunds storage sf = _stakedFundsStorage(nwrole);
-        require(amount == msg.value, "stake ETH: amount invalid");
-        require(sf.networks.length == 0 && sf.stakedAmount == 0, "add new only"); // TODO: add to existing
-        sf.networks = networks;
-        sf.stakedAmount = msg.value; // TODO: multiple tokens
-
-        emit Stake(msg.sender, amount, token, networks);
-    }
-
-    function unstake(Route r, address token) external {
-        StakedFunds storage sf = _stakedFundsStorage(nwrole);
-        require(sf.stakedAmount >= sf.lockedAmount, "invalid amounts");
-        uint unstakeAmt = sf.stakedAmount - sf.lockedAmount;
-        require(unstakeAmt > 0, "zero stake");
-
-        (bool success, ) = address(msg.sender).call{value: unstakeAmt}("");
-        require(success, "unstake failed");
-        emit Unstake(msg.sender, unstakeAmt, token, sf.networks);
-        sf.stakedAmount -= unstakeAmt;
-    }
-
-    function _stakedFundsStorage(NetworkRoles nwrole) internal view returns (StakedFunds storage sf) {
-        Relayer storage r = boltRelayers[msg.sender];
-        if (nwrole == NetworkRoles.SOURCE) {
-            sf = r.to;
-        } else {
-            sf = r.from;
+    function stake(Route[] memory routes, uint[] memory amounts, address token) validRoutes(routes) external payable {
+        uint totalAmount = 0;
+        BoltRelayer storage r = boltRelayers[msg.sender];
+        for (uint i = 0; i < routes.length; i++) {
+            MultiTokenStakedFunds storage sf = _stakedFundsStorage(msg.sender, routes[i]);
+            sf.stake[token].amount += amounts[i];         
+            totalAmount += amounts[i];
         }
-        return sf;
+        if (token == NATIVE_TOKEN_ADDRESS) {
+            require(totalAmount == msg.value, "stake ETH: amount invalid");    
+        } else {
+            TransferHelper.safeTransferFrom(token, msg.sender, address(this), totalAmount);
+        }
+        if (r.unstakeEnableBlock == 0) {
+            // new relayer
+            r.unstakeEnableBlock = block.number + params.durationToFirstUnstake();
+        }
+        
+        emit Stake(msg.sender, routes, amounts, token);
     }
 
-    function routeId(Route r) public pure returns (uint) {
-        return r.src * 256 + r.dst;
+    function unstake(Route memory r, uint amount, address token) external {
+        MultiTokenStakedFunds storage sf = _stakedFundsStorage(msg.sender, r);
+        require(sf.stake[token].amount > 0, "unstake zero"); 
+
+        uint newLockedTotal = amount;
+        for (uint i = 0; i < sf.stake[token].locked.length; i++) {
+            newLockedTotal += sf.stake[token].locked[i].amount; // must not overflow
+        }
+        require(newLockedTotal < sf.stake[token].amount, "not enough funds to unstake");
+        LockedFunds memory newLock = LockedFunds(amount, block.number + params.durationToUnstake(), bytes32(0), StakeLockTypes.UNSTAKE);
+        sf.stake[token].locked.push(newLock);
+
+        // emit Unstake(msg.sender, newLockedTotal, token, sf.networks);
+        // sf.stakedAmount -= newLockedTotal;
     }
 
-    modifier validRoute(Route r) {
-        require(r.src != r.dst, "ROUTE invalid");
-        require(r.src == CURRENT_NETWORK || r.dst == CURRENT_NETWORK, "route must contain current net");
+    function _stakedFundsStorage(address relayerAddr, Route memory route) internal view returns (MultiTokenStakedFunds storage sf) {
+        BoltRelayer storage r = boltRelayers[relayerAddr];
+        return r.stakeMap[routeId(route)];
+    }
+
+    function routeId(Route memory r) public pure returns (uint) {
+        return uint(r.src) * 256 + uint(r.dst);
+    }
+
+    modifier validRoutes(Route[] memory rs) {
+        for (uint i = 0; i < rs.length; i++) {
+            require(rs[i].src != rs[i].dst, "ROUTE invalid");
+            require(rs[i].src == CURRENT_NETWORK || rs[i].dst == CURRENT_NETWORK, "route must contain current net");
+        }
         _;
     }
 
-    modifier validSrc(Route r) {
+    modifier validSrc(Route memory r) {
         require(r.src != r.dst, "ROUTE invalid");
         require(r.src == CURRENT_NETWORK, "SRC invalid");
         _;
     }
 
-    modifier validDst(Route r) {
+    modifier validDst(Route memory r) {
         require(r.src != r.dst, "ROUTE invalid");
         require(r.dst == CURRENT_NETWORK, "DST invalid");
         _;
@@ -83,41 +99,9 @@ contract Main is IMain, MainStructs {
     function relay(MainStructs.SwapTranscript calldata swapData, bytes calldata signature, bool serving) external payable {}
     function relayReturn(bytes32 swapDataHash, address boltOperator, bytes calldata signature) external {}
     function slash(bytes[2] calldata signatures, SwapTranscript calldata ts) external {}
-    function getAvailableRelayers(uint amount, address token) public view returns (Relayer[] memory r) {
+    function getAvailableRelayers(uint amount, address token) public view returns (address[] memory r) {
         return r;
     }
 }
 
-contract BoltParameters is Ownable {
-    uint public constant BASE_PRECISION = 10000; // "percent" variables below are expressed in precision e.g. 2500 means 25%
 
-    uint[] public watcherRewardPercent; // reward percent varies per slash rule; there are 3 rules initially
-
-    uint[] public burnedCollateralPercent;
-
-    uint[] public minFee; // minFee is defined for each actor role
-    uint[] public feePercent; // minFee is defined for each actor role
-
-    // durations are in blocks (vary by network)
-    uint public durationToUnstake; // from stake accepted -> unstake enabled
-    uint public lockDuration; // time to lock a relayer's stake after a swap
-
-
-
-    constructor(uint[] memory _wreward, uint[] memory _burn, uint[] _minFee, uint[] _feePercent) {
-        watcherRewardPercent = _wreward;
-        burnedCollateralPercent = _burn;
-        minFee = _minFee;
-        feePercent = _feePercent;
-    }
-
-    // setters
-    function setWatcherRewardPercent(uint8 i, uint v) external onlyOwner {
-        require(i <= watcherRewardPercent.length, "watcherRewardPercent invalid index");
-        watcherRewardPercent[i] = v;
-    }
-
-    function setAllWatcherRewardPercent(uint[] lst) external onlyOwner {
-        watcherRewardPercent = lst;
-    }
-}
