@@ -3,6 +3,7 @@ import "@nomicfoundation/hardhat-toolbox";
 
 import "solidity-coverage";
 import "hardhat-gas-reporter";
+import "hardhat-deploy";
 
 
 const config: HardhatUserConfig = {

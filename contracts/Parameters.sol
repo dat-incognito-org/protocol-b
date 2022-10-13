@@ -9,19 +9,19 @@ contract Parameters is Ownable {
 
     uint[] public watcherRewardPercent; // reward percent varies per slash rule; there are 3 rules initially
 
-    uint[] public burnedCollateralPercent;
+    uint[] public overCollateralPercent;
 
     uint[] public minFee; // minFee is defined for each actor role
-    uint[] public feePercent; // minFee is defined for each actor role
+    uint[] public feePercent; // feePercent is defined for each actor role
 
     // durations are in blocks (vary by network)
     uint public durationToUnstake; // from unstake accepted -> funds returned
     uint public durationToFirstUnstake; // from stake accepted -> unstake enabled
     uint public lockDuration; // time to lock a relayer's stake after a swap
 
-    constructor(uint[] memory _wreward, uint[] memory _burn, uint[] memory _minFee, uint[] memory _feePercent) {
+    constructor(uint[] memory _wreward, uint[] memory _oc, uint[] memory _minFee, uint[] memory _feePercent) {
         watcherRewardPercent = _wreward;
-        burnedCollateralPercent = _burn;
+        overCollateralPercent = _oc;
         minFee = _minFee;
         feePercent = _feePercent;
     }

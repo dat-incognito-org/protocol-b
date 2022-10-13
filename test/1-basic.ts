@@ -8,7 +8,7 @@ describe("Stake & Unstake by single relayer", function() {
         const [deployer, relayer] = await ethers.getSigners();
 
         const MainContract = await ethers.getContractFactory("Main");
-        const mainContract = await MainContract.deploy();
+        const mainContract = await MainContract.deploy('0x0000000000000000000000000000000000001000');
 
         return { mainContract, deployer, relayer };
     }
@@ -34,9 +34,10 @@ describe("Stake & Unstake by single relayer", function() {
         it("Should accept stake from new relayer", async function() {
             const { mainContract, relayer: rel } = await loadFixture(deployFixture);
             const amt = ethers.utils.parseUnits('3', 'ether');
-            await expect(mainContract.connect(rel).stake(0, amt, [1], { value: amt }))
+            const ETH = await mainContract.NATIVE_TOKEN_ADDRESS();
+            await expect(mainContract.connect(rel).stake(0, amt, ETH, [1], { value: amt }))
             .to.emit(mainContract, "Stake")
-            .withArgs(rel.address, amt, [1]);
+            .withArgs(rel.address, amt, ETH, [1]);
         });
     });
 });
