@@ -9,10 +9,11 @@ const deployFn: DeployFunction = async function(hre: HardhatRuntimeEnvironment) 
     const { deploy } = deployments;
 
     const { deployer, relayer } = await getNamedAccounts();
+    const p = await deployments.get('Parameters');
 
-    await deploy('Parameters', {
+    await deploy('Main', {
         from: deployer,
-        args: devSystemParameters,
+        args: ['0x0000000000000000000000000000000000001000', 0, p.address],
         log: true,
         autoMine: true, // speed up deployment on local network (ganache, hardhat), no effect on live networks
     });

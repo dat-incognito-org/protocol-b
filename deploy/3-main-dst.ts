@@ -9,10 +9,11 @@ const deployFn: DeployFunction = async function(hre: HardhatRuntimeEnvironment) 
     const { deploy } = deployments;
 
     const { deployer, relayer } = await getNamedAccounts();
+    const p = await deployments.get('Parameters');
 
-    await deploy('Parameters', {
+    await deploy('MainTestDst', {
         from: deployer,
-        args: devSystemParameters,
+        args: ['0x0000000000000000000000000000000000001001', 1, p.address],
         log: true,
         autoMine: true, // speed up deployment on local network (ganache, hardhat), no effect on live networks
     });
@@ -20,3 +21,4 @@ const deployFn: DeployFunction = async function(hre: HardhatRuntimeEnvironment) 
 
 export default deployFn;
 deployFn.tags = ['Parameters'];
+deployFn.skip = hre => Promise.resolve(hre.network.name != 'localhost' && hre.network.name != 'hardhat' && hre.network.name != 'goerli' && hre.network.name != 'mumbai');

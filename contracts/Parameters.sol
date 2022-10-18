@@ -18,17 +18,33 @@ contract Parameters is Ownable {
     uint public durationToUnstake; // from unstake accepted -> funds returned
     uint public durationToFirstUnstake; // from stake accepted -> unstake enabled
     uint public lockDuration; // time to lock a relayer's stake after a swap
+    uint public swapExpiryDuration;
+    uint public fulfillExpiryDuration;
 
-    constructor(uint[] memory _wreward, uint[] memory _oc, uint[] memory _minFee, uint[] memory _feePercent) {
+    constructor(
+        uint[] memory _wreward,
+        uint[] memory _oc,
+        uint[] memory _minFee,
+        uint[] memory _feePercent,
+        uint[5] memory durations   
+    ) {
         watcherRewardPercent = _wreward;
         overCollateralPercent = _oc;
         minFee = _minFee;
         feePercent = _feePercent;
+        durationToUnstake = durations[0];
+        durationToFirstUnstake = durations[1];
+        lockDuration = durations[2];
+        swapExpiryDuration = durations[3];
+        fulfillExpiryDuration = durations[4];
     }
 
     // setters
     function setWatcherRewardPercent(uint8 i, uint v) external onlyOwner {
-        require(i <= watcherRewardPercent.length, "watcherRewardPercent invalid index");
+        require(
+            i <= watcherRewardPercent.length,
+            "watcherRewardPercent invalid index"
+        );
         watcherRewardPercent[i] = v;
     }
 
