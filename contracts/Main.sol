@@ -358,11 +358,12 @@ contract Main is IMain, MainStructs {
         _fulfill(s, boltOperator);
     }
 
-    function _fulfill(SwapData calldata s, address boltOperator)
-        internal
-    {
+    function _fulfill(SwapData calldata s, address boltOperator) internal {
         FulfillData memory fdata = FulfillData(s, block.number, boltOperator);
-        require(fdata.swapData.route.dst == CURRENT_NETWORK, "fulfill dstNetwork invalid");
+        require(
+            fdata.swapData.route.dst == CURRENT_NETWORK,
+            "fulfill dstNetwork invalid"
+        );
         uint crossAmount = fdata.swapData.crossAmount;
         address crossToken = fdata.swapData.dstMsg.tokenIn;
         if (crossToken == NATIVE_TOKEN_ADDRESS) {
@@ -393,13 +394,25 @@ contract Main is IMain, MainStructs {
     ) external {
         FulfillData storage f = fulfills[swapID]; // avoid cloning to memory
         // check f exists (and is non-zero)
-        require(f.swapData.status != Status.INVALID && f.boltOperator != address(0), "fulfill non-existent");
+        require(
+            f.swapData.status != Status.INVALID && f.boltOperator != address(0),
+            "fulfill non-existent"
+        );
         // check operator address matches
         require(f.boltOperator == boltOperator, "relay operatorAddr mismatch");
         // check fulfillData not expired
-        require(block.number < f.startBlock + params.fulfillExpiryDuration(), "fulfill expired");
+        require(
+            block.number < f.startBlock + params.fulfillExpiryDuration(),
+            "fulfill expired"
+        );
         // verify signature
-        bytes32 signedContent = keccak256(abi.encodePacked("\x19Bolt Signed Relay Message:\n64", swapID, boltOperator));
+        bytes32 signedContent = keccak256(
+            abi.encodePacked(
+                "\x19Bolt Signed Relay Message:\n64",
+                swapID,
+                boltOperator
+            )
+        );
         address recoveredAddress = ECDSA.recover(signedContent, signature);
         require(recoveredAddress == boltRelayerAddr, "relay signature invalid");
         ExecutableMessage memory m = f.swapData.dstMsg;
@@ -418,13 +431,18 @@ contract Main is IMain, MainStructs {
 
     modifier checkSanitySwap(SwapData memory s) {
         require(s.status != Status.INVALID, "swap status invalid");
-        require(s.requester != address(0) && s.boltRelayerAddr != address(0), "swap u/r address invalid");
+        require(
+            s.requester != address(0) && s.boltRelayerAddr != address(0),
+            "swap u/r address invalid"
+        );
         _;
-
     }
     modifier checkSanityFulfill(FulfillData memory f) {
         require(f.swapData.status != Status.INVALID, "fulfill status invalid");
-        require(f.boltOperator != address(0), "fulfill operator address invalid");
+        require(
+            f.boltOperator != address(0),
+            "fulfill operator address invalid"
+        );
         _;
     }
 
@@ -436,35 +454,36 @@ contract Main is IMain, MainStructs {
     ) external {
         SwapData storage s = swaps[swapID]; // avoid cloning to memory
         // check f exists (and is non-zero)
-        require(s.status != Status.INVALID && s.boltRelayerAddr != address(0) && s.requester != address(0), "swap non-existent");
+        require(
+            s.status != Status.INVALID &&
+                s.boltRelayerAddr != address(0) &&
+                s.requester != address(0),
+            "swap non-existent"
+        );
         // check fulfillData not expired
-        require(block.number < s.startBlock + params.swapExpiryDuration(), "swap expired");
+        require(
+            block.number < s.startBlock + params.swapExpiryDuration(),
+            "swap expired"
+        );
         // if (boltRelayerAddr != msg.sender) { // TBD: relayer might also sign blocknum
         // }
         // verify signature
-        bytes32 signedContent = keccak256(abi.encodePacked("\x19Bolt Signed Relay Message:\n64", swapID, boltOperator));
+        bytes32 signedContent = keccak256(
+            abi.encodePacked(
+                "\x19Bolt Signed Relay Message:\n64",
+                swapID,
+                boltOperator
+            )
+        );
         address recoveredAddress = ECDSA.recover(signedContent, signature);
         require(recoveredAddress == boltRelayerAddr, "relay signature invalid");
+
         // TODO: direct funds to operator
     }
 
     // TODO
 
-    function slash(
-        bytes[2] calldata signatures,
-        FulfillData calldata ts
-    ) external
+    function slash(bytes[2] calldata signatures, FulfillData calldata ts)
+        external
     {}
-}
-
-contract MainTestDst is Main {
-    constructor(
-        address _wrapped,
-        Networks _net,
-        address _params
-    ) Main(_wrapped, _net, _params) {}
-
-    function newRoute(Networks src, Networks dst) public pure returns (Route memory) {
-        return Route(src, dst);
-    }
 }
