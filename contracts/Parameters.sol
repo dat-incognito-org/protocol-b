@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.9;
 
-import "./IMain.sol";
+import "./IParameters.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
-contract Parameters is Ownable {
+contract Parameters is Ownable, IParameters {
     uint public constant BASE_PRECISION = 10000; // "percent" variables below are expressed in precision e.g. 2500 means 25%
 
     uint[] public watcherRewardPercent; // reward percent varies per slash rule; there are 3 rules initially
@@ -18,7 +18,9 @@ contract Parameters is Ownable {
     uint public durationToUnstake; // from unstake accepted -> funds returned
     uint public durationToFirstUnstake; // from stake accepted -> unstake enabled
     uint public lockDuration; // time to lock a relayer's stake after a swap
-    uint public swapExpiryDuration;
+    
+    // will remove
+    uint public swapExpiryDuration; 
     uint public fulfillExpiryDuration;
 
     constructor(

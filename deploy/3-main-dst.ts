@@ -13,7 +13,7 @@ const deployFn: DeployFunction = async function(hre: HardhatRuntimeEnvironment) 
 
     await deploy('MainTestDst', {
         from: deployer,
-        args: ['0x0000000000000000000000000000000000001001', 1, p.address],
+        args: [1, p.address],
         log: true,
         autoMine: true, // speed up deployment on local network (ganache, hardhat), no effect on live networks
     });

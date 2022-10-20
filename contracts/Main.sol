@@ -2,7 +2,7 @@
 pragma solidity ^0.8.9;
 
 import "./IMain.sol";
-import "./Parameters.sol";
+import "./IParameters.sol";
 import "@uniswap/v3-periphery/contracts/libraries/TransferHelper.sol";
 import "@openzeppelin/contracts/utils/Counters.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
@@ -12,13 +12,15 @@ import "hardhat/console.sol";
 /// @title Main logic contract for Bolt Protocol
 contract Main is IMain, MainStructs {
     using Counters for Counters.Counter;
-
-    uint public constant MAX_RELAYERS_LEN = 100;
+    string public constant UNLOCK_MESSAGE_PREFIX =
+        "\x19Bolt Signed Unlock Message:\n32";
+    string public constant RELAY_MESSAGE_PREFIX =
+        "\x19Bolt Signed Relay Message:\n64";
     Networks public immutable CURRENT_NETWORK;
     address public constant NATIVE_TOKEN_ADDRESS =
         0x0000000000000000000000000000000000000000;
-    address public immutable NATIVE_WRAPPED_TOKEN;
-    Parameters public immutable params;
+    IParameters public immutable params;
+    address public immutable PROTOCOL_FEE_RECIPIENT;
 
     mapping(address => BoltRelayer) public boltRelayers;
     address[] public boltRelayerAddresses;
@@ -26,15 +28,16 @@ contract Main is IMain, MainStructs {
     mapping(bytes32 => SwapData) public swaps;
     mapping(bytes32 => FulfillData) public fulfills; // TODO: after they finalize, move swaps & fulfills entries to "completed" mapping to free up storage
 
+    mapping(bytes32 => uint) public lockedFunds;
+
     constructor(
-        address _wrapped,
         Networks _net,
-        address _params
+        address _params,
+        address feeRecipient
     ) {
-        require(_wrapped != address(0), "wrapped address zero");
-        NATIVE_WRAPPED_TOKEN = _wrapped;
         CURRENT_NETWORK = _net;
-        params = Parameters(_params);
+        params = IParameters(_params);
+        PROTOCOL_FEE_RECIPIENT = feeRecipient;
     }
 
     /// @notice Any relayer can add stake to take swap requests & earn fees;
@@ -51,10 +54,11 @@ contract Main is IMain, MainStructs {
         BoltRelayer storage r = boltRelayers[msg.sender];
         uint[] memory routeIds = new uint[](routes.length);
         for (uint i = 0; i < routes.length; i++) {
-            routeIds[i] = routeId(routes[i]);
-            MultiTokenStakedFunds storage msf = boltRelayers[msg.sender]
-                .stakeMap[routeIds[i]];
-            msf.stake[token].amount += amounts[i];
+            routeIds[i] = getRouteID(routes[i]);
+            StakedFunds storage sf = boltRelayers[msg.sender].stakesByRoute[
+                routeIds[i]
+            ];
+            sf.stakeByToken[token] += amounts[i];
             totalAmount += amounts[i];
         }
         if (token == NATIVE_TOKEN_ADDRESS) {
@@ -84,40 +88,39 @@ contract Main is IMain, MainStructs {
         address token
     ) external {
         BoltRelayer storage r = boltRelayers[msg.sender];
-        StakedFunds memory sf = _getStakedFunds(msg.sender, route, token);
+        uint stakedAmount = r.stakesByRoute[getRouteID(route)].stakeByToken[
+            token
+        ];
         require(
             block.number >= r.unstakeEnableBlock,
             "first unstake time not met"
         );
-        require(sf.amount > 0, "unstake zero");
+        require(stakedAmount > 0, "unstake zero");
 
-        uint newLockedTotal = amount;
-        for (uint i = 0; i < sf.locked.length; i++) {
-            newLockedTotal += sf.locked[i].amount;
-        }
-        require(newLockedTotal < sf.amount, "unstake: not enough funds");
-
+        swapCounter.increment();
         uint unlockTime = _lockStake(
-            msg.sender,
-            route,
-            token,
             amount,
+            swapCounter.current(),
+            getRouteID(route),
+            token,
+            address(0), // must always wait full unstake duration
+            msg.sender,
             bytes32(0),
-            StakeLockTypes.UNSTAKE
+            LockTypes.UNSTAKE
         );
-        emit Unstake(msg.sender, routeId(route), amount, token, unlockTime);
+        emit Unstake(msg.sender, getRouteID(route), amount, token, unlockTime);
     }
 
     function _getStakedFunds(
         address relayerAddr,
         Route memory route,
         address token
-    ) internal view returns (StakedFunds memory) {
+    ) internal view returns (uint) {
         BoltRelayer storage r = boltRelayers[relayerAddr];
-        return r.stakeMap[routeId(route)].stake[token];
+        return r.stakesByRoute[getRouteID(route)].stakeByToken[token];
     }
 
-    function routeId(Route memory r) public pure returns (uint) {
+    function getRouteID(Route memory r) public pure returns (uint) {
         return uint(r.src) * 256 + uint(r.dst);
     }
 
@@ -151,55 +154,63 @@ contract Main is IMain, MainStructs {
         ExecutableMessage calldata srcMsg,
         ExecutableMessage calldata dstMsg
     ) external payable {
-        // console.log("%s %s %s", uint(route.src), uint(route.dst), uint(CURRENT_NETWORK));
-        require(route.src == CURRENT_NETWORK, "swap srcNetwork invalid");
-        (address returnToken, uint returnAmt) = _executeSrcMsg(amount, srcMsg);
-        require(
-            returnToken == srcMsg.tokenOut,
-            "swap srcMsg tokenOut mismatch"
-        );
+        SwapData memory newSwapData;
+        uint lockAmount;
+        {
+            require(route.src == CURRENT_NETWORK, "swap srcNetwork invalid");
+            (address returnToken, uint returnAmt) = _executeSrcMsg(
+                amount,
+                srcMsg
+            );
+            require(
+                returnToken == srcMsg.tokenOut,
+                "swap srcMsg tokenOut mismatch"
+            );
 
-        uint availableStake = getAvailableStake(
-            boltRelayerAddr,
-            route,
-            srcMsg.tokenOut
-        );
-        (uint[] memory fees, uint crossAmount) = getSwapFees(returnAmt);
-        uint totalFees;
-        for (uint i = 0; i < fees.length; i++) {
-            totalFees += fees[i];
+            uint availableStake = getAvailableStake(
+                boltRelayerAddr,
+                route,
+                srcMsg.tokenOut
+            );
+            (uint[] memory fees, uint crossAmount) = getSwapFees(returnAmt);
+            uint totalFees;
+            for (uint i = 0; i < fees.length; i++) {
+                totalFees += fees[i];
+            }
+            lockAmount = getLockAmount(crossAmount);
+            require(
+                availableStake >= lockAmount,
+                "swap: relayer insufficient stake"
+            );
+
+            swapCounter.increment();
+            // store new swap data
+            newSwapData = SwapData(
+                msg.sender,
+                boltRelayerAddr,
+                route,
+                swapCounter.current(),
+                crossAmount,
+                totalFees,
+                srcMsg,
+                dstMsg,
+                block.number,
+                Status.WAITING
+            );
         }
-        uint lockAmount = getLockAmount(crossAmount);
-        require(
-            availableStake >= lockAmount,
-            "swap: relayer insufficient stake"
-        );
-
-        swapCounter.increment();
-        // store new swap data
-        SwapData memory newSwapData = SwapData(
-            msg.sender,
-            boltRelayerAddr,
-            route,
-            swapCounter.current(),
-            crossAmount,
-            totalFees,
-            srcMsg,
-            dstMsg,
-            block.number,
-            Status.WAITING
-        );
         bytes32 h = computeSwapID(newSwapData);
         _lockStake(
-            boltRelayerAddr,
-            route,
-            returnToken,
             lockAmount,
+            newSwapData.nonce,
+            getRouteID(newSwapData.route),
+            srcMsg.tokenOut,
+            newSwapData.requester,
+            boltRelayerAddr,
             h,
-            StakeLockTypes.SWAP_LOCK
+            LockTypes.SWAP_LOCK
         );
         swaps[h] = newSwapData;
-        emit Swap(msg.sender, boltRelayerAddr, routeId(route), h);
+        emit Swap(msg.sender, boltRelayerAddr, getRouteID(route), h);
     }
 
     function computeSwapID(SwapData memory s) public pure returns (bytes32) {
@@ -209,23 +220,160 @@ contract Main is IMain, MainStructs {
     }
 
     function _lockStake(
-        address raddr,
-        Route memory route,
-        address token,
         uint amount,
+        uint nonce,
+        uint routeID,
+        address token,
+        address depositor,
+        address raddr,
         bytes32 h,
-        StakeLockTypes ltype
+        LockTypes ltype
     ) internal returns (uint unlockTime) {
-        if (ltype == StakeLockTypes.UNSTAKE) {
+        if (ltype == LockTypes.UNSTAKE) {
             unlockTime = block.number + params.durationToUnstake();
-        } else if (ltype == StakeLockTypes.SWAP_LOCK) {
+        } else if (ltype == LockTypes.SWAP_LOCK) {
             unlockTime = block.number + params.lockDuration();
+            StakedFunds storage stakes = boltRelayers[raddr].stakesByRoute[
+                routeID
+            ];
+            uint newTotalLocked = stakes.totalLockedByToken[token] + amount;
+            require(
+                newTotalLocked <=
+                    boltRelayers[raddr].stakesByRoute[routeID].stakeByToken[
+                        token
+                    ],
+                "lock exceeds stake amount"
+            );
+            stakes.totalLockedByToken[token] = newTotalLocked;
+        } else if (ltype == LockTypes.PENDING_REWARD) {
+            unlockTime = block.number + params.lockDuration();
+        } else {
+            revert("invalid stake lock type");
         }
-        LockedFunds memory newLock = LockedFunds(amount, unlockTime, h, ltype);
 
-        BoltRelayer storage r = boltRelayers[raddr];
-        r.stakeMap[routeId(route)].stake[token].locked.push(newLock);
+        bytes32 mapkey = keccak256(
+            abi.encodePacked(
+                amount,
+                nonce,
+                routeID,
+                token,
+                depositor,
+                raddr,
+                h,
+                ltype
+            )
+        );
+
+        lockedFunds[mapkey] = unlockTime;
         return unlockTime;
+    }
+
+    function unlock(
+        uint amount,
+        uint nonce,
+        uint routeID,
+        address token,
+        address depositor,
+        address receiver,
+        bytes32 swapID,
+        LockTypes lockType
+    ) external {
+        _unlock(
+            amount,
+            nonce,
+            routeID,
+            token,
+            depositor,
+            receiver,
+            swapID,
+            lockType,
+            bytes("")
+        );
+    }
+
+    function depositorUnlock(
+        uint amount,
+        uint nonce,
+        uint routeID,
+        address token,
+        address depositor,
+        address receiver,
+        bytes32 swapID,
+        LockTypes lockType,
+        bytes memory signature
+    ) external {
+        _unlock(
+            amount,
+            nonce,
+            routeID,
+            token,
+            depositor,
+            receiver,
+            swapID,
+            lockType,
+            signature
+        );
+    }
+
+    function _unlock(
+        uint amount,
+        uint nonce,
+        uint routeID,
+        address token,
+        address depositor,
+        address receiver,
+        bytes32 swapID,
+        LockTypes lockType,
+        bytes memory signature
+    ) internal {
+        bytes32 mapkey = keccak256(
+            abi.encodePacked(
+                amount,
+                nonce,
+                routeID,
+                token,
+                depositor,
+                receiver,
+                swapID,
+                lockType
+            )
+        );
+        uint unlockTime = lockedFunds[mapkey];
+        require(amount > 0 && unlockTime > 0, "no locked funds");
+        if (depositor != address(0) && signature.length > 0) {
+            // unlock by depositor signature
+            bytes32 signedContent = keccak256(
+                abi.encodePacked(UNLOCK_MESSAGE_PREFIX, swapID)
+            );
+            address recoveredAddress = ECDSA.recover(signedContent, signature);
+            require(recoveredAddress == depositor, "relay signature invalid");
+        } else {
+            require(block.number >= unlockTime, "unlock time not met");
+        }
+
+        delete (lockedFunds[mapkey]);
+        // transfer
+        if (lockType == LockTypes.UNSTAKE || lockType == LockTypes.SWAP_LOCK) {
+            if (token == NATIVE_TOKEN_ADDRESS) {
+                TransferHelper.safeTransferETH(receiver, amount);
+            } else {
+                TransferHelper.safeTransfer(token, receiver, amount);
+            }
+        } else if (lockType == LockTypes.SWAP_LOCK) {
+            uint totalLocked = boltRelayers[receiver]
+                .stakesByRoute[routeID]
+                .totalLockedByToken[token];
+            require(totalLocked > amount, "invalid total locked amount");
+            boltRelayers[receiver].stakesByRoute[routeID].totalLockedByToken[
+                token
+            ] = totalLocked - amount;
+        }
+    }
+
+    function _updateLock(bytes32 _oldKey, bytes32 _newKey) internal {
+        uint amount = lockedFunds[_oldKey];
+        delete (lockedFunds[_oldKey]);
+        lockedFunds[_newKey] = amount;
     }
 
     function _executeSrcMsg(uint amount, ExecutableMessage memory srcMsg)
@@ -312,20 +460,18 @@ contract Main is IMain, MainStructs {
         Route memory route,
         address token
     ) public view returns (uint) {
-        StakedFunds memory sf = _getStakedFunds(relayerAddr, route, token);
-        return getAvailableStake(sf);
+        StakedFunds storage sf = boltRelayers[relayerAddr].stakesByRoute[
+            getRouteID(route)
+        ];
+        uint l = sf.totalLockedByToken[token];
+        uint s = sf.stakeByToken[token];
+        require(l < s, "invalid stake & locked amounts");
+        return s - l;
     }
 
-    function getAvailableStake(StakedFunds memory sf)
-        internal
-        pure
-        returns (uint)
-    {
-        uint result = sf.amount;
-        for (uint i = 0; i < sf.locked.length; i++) {
-            result -= sf.locked[i].amount; // must not underflow
-        }
-        return result;
+    function testMarshal() public pure returns (uint) {
+        Route memory r;
+        return abi.encodePacked(r.src, r.dst).length;
     }
 
     function getAvailableRelayers(
@@ -333,7 +479,7 @@ contract Main is IMain, MainStructs {
         uint amount,
         address token
     ) public view returns (address[] memory) {
-        address[] memory temp = new address[](MAX_RELAYERS_LEN);
+        address[] memory temp = new address[](boltRelayerAddresses.length);
         uint resultLen = 0;
         for (uint i = 0; i < boltRelayerAddresses.length; i++) {
             uint stk = getAvailableStake(boltRelayerAddresses[i], route, token);
@@ -343,7 +489,6 @@ contract Main is IMain, MainStructs {
             }
         }
         address[] memory result = new address[](resultLen);
-        if (resultLen > MAX_RELAYERS_LEN) resultLen = MAX_RELAYERS_LEN;
         for (uint i = 0; i < resultLen; i++) {
             result[i] = temp[i];
         }
@@ -355,10 +500,14 @@ contract Main is IMain, MainStructs {
         external
         payable
     {
-        _fulfill(s, boltOperator);
+        (bytes32 h, FulfillData memory f) = _fulfill(s, boltOperator);
+        fulfills[h] = f;
     }
 
-    function _fulfill(SwapData calldata s, address boltOperator) internal {
+    function _fulfill(SwapData calldata s, address boltOperator)
+        internal
+        returns (bytes32, FulfillData memory)
+    {
         FulfillData memory fdata = FulfillData(s, block.number, boltOperator);
         require(
             fdata.swapData.route.dst == CURRENT_NETWORK,
@@ -377,13 +526,14 @@ contract Main is IMain, MainStructs {
             );
         }
         bytes32 h = computeSwapID(fdata.swapData);
-        fulfills[h] = fdata;
+
         emit Fulfill(
             boltOperator,
             fdata.swapData.boltRelayerAddr,
-            routeId(fdata.swapData.route),
+            getRouteID(fdata.swapData.route),
             h
         );
+        return (h, fdata);
     }
 
     function relay(
@@ -392,7 +542,28 @@ contract Main is IMain, MainStructs {
         address boltRelayerAddr,
         bytes calldata signature
     ) external {
-        FulfillData storage f = fulfills[swapID]; // avoid cloning to memory
+        FulfillData memory f = fulfills[swapID];
+        _relay(swapID, f, boltOperator, boltRelayerAddr, signature);
+    }
+
+    function fulfillAndRelay(
+        SwapData calldata s,
+        address boltOperator,
+        address boltRelayerAddr,
+        bytes calldata signature
+    ) external payable {
+        (bytes32 h, FulfillData memory f) = _fulfill(s, boltOperator);
+        fulfills[h] = f; // unoptimized storage
+        _relay(h, f, boltOperator, boltRelayerAddr, signature);
+    }
+
+    function _relay(
+        bytes32 swapID,
+        FulfillData memory f,
+        address boltOperator,
+        address boltRelayerAddr,
+        bytes calldata signature
+    ) internal {
         // check f exists (and is non-zero)
         require(
             f.swapData.status != Status.INVALID && f.boltOperator != address(0),
@@ -402,31 +573,27 @@ contract Main is IMain, MainStructs {
         require(f.boltOperator == boltOperator, "relay operatorAddr mismatch");
         // check fulfillData not expired
         require(
-            block.number < f.startBlock + params.fulfillExpiryDuration(),
+            block.number < f.startBlock + params.lockDuration(),
             "fulfill expired"
         );
         // verify signature
         bytes32 signedContent = keccak256(
-            abi.encodePacked(
-                "\x19Bolt Signed Relay Message:\n64",
-                swapID,
-                boltOperator
-            )
+            abi.encodePacked(RELAY_MESSAGE_PREFIX, swapID, boltOperator)
         );
         address recoveredAddress = ECDSA.recover(signedContent, signature);
         require(recoveredAddress == boltRelayerAddr, "relay signature invalid");
         ExecutableMessage memory m = f.swapData.dstMsg;
         _executeDstMsg(f.swapData.crossAmount, m);
-    }
-
-    function simpleSig(
-        bytes32 swapID,
-        address boltRelayerAddr,
-        bytes calldata signature
-    ) public pure returns (bool) {
-        bytes32 signedContent = swapID;
-        address recoveredAddress = ECDSA.recover(signedContent, signature);
-        return recoveredAddress == boltRelayerAddr;
+        _lockStake(
+            getLockAmount(f.swapData.crossAmount),
+            f.swapData.nonce,
+            getRouteID(f.swapData.route),
+            f.swapData.dstMsg.tokenIn,
+            f.boltOperator,
+            boltRelayerAddr,
+            swapID,
+            LockTypes.SWAP_LOCK
+        );
     }
 
     modifier checkSanitySwap(SwapData memory s) {
@@ -452,33 +619,90 @@ contract Main is IMain, MainStructs {
         address boltRelayerAddr,
         bytes calldata signature
     ) external {
-        SwapData storage s = swaps[swapID]; // avoid cloning to memory
-        // check f exists (and is non-zero)
-        require(
-            s.status != Status.INVALID &&
-                s.boltRelayerAddr != address(0) &&
-                s.requester != address(0),
-            "swap non-existent"
-        );
-        // check fulfillData not expired
-        require(
-            block.number < s.startBlock + params.swapExpiryDuration(),
-            "swap expired"
-        );
-        // if (boltRelayerAddr != msg.sender) { // TBD: relayer might also sign blocknum
-        // }
-        // verify signature
-        bytes32 signedContent = keccak256(
-            abi.encodePacked(
-                "\x19Bolt Signed Relay Message:\n64",
-                swapID,
-                boltOperator
-            )
-        );
-        address recoveredAddress = ECDSA.recover(signedContent, signature);
-        require(recoveredAddress == boltRelayerAddr, "relay signature invalid");
+        SwapData memory s = swaps[swapID];
 
-        // TODO: direct funds to operator
+        {
+            // check f exists (and is non-zero)
+            require(
+                s.status != Status.INVALID &&
+                    s.boltRelayerAddr != address(0) &&
+                    s.requester != address(0),
+                "swap non-existent"
+            );
+
+            // if (boltRelayerAddr != msg.sender) { // TBD: relayer might also sign blocknum
+            // }
+            // verify signature
+            bytes32 signedContent = keccak256(
+                abi.encodePacked(RELAY_MESSAGE_PREFIX, swapID, boltOperator)
+            );
+            address recoveredAddress = ECDSA.recover(signedContent, signature);
+            require(
+                recoveredAddress == boltRelayerAddr,
+                "relay signature invalid"
+            );
+        }
+
+        {
+            // reset relayer's stake lock
+            bytes32 mapkey = keccak256(
+                abi.encodePacked(
+                    getLockAmount(s.crossAmount),
+                    s.nonce,
+                    getRouteID(s.route),
+                    s.srcMsg.tokenOut,
+                    s.requester,
+                    boltRelayerAddr,
+                    swapID,
+                    LockTypes.SWAP_LOCK
+                )
+            );
+            uint unlockTime = lockedFunds[mapkey];
+            // check swap not expired
+            require(block.number < unlockTime, "swap expired");
+            lockedFunds[mapkey] = block.number + params.lockDuration();
+        }
+
+        {
+            // - move swap value to locked value in operator & relayer 's locked lists
+            (uint[] memory fees, uint crossAmount) = getSwapFees(
+                s.crossAmount + s.totalFees
+            );
+            require(
+                crossAmount == s.crossAmount,
+                "recomputed crossAmount mismatch"
+            );
+            _lockStake(
+                crossAmount + fees[uint(BoltActors.OPERATOR)],
+                s.nonce,
+                getRouteID(s.route),
+                s.srcMsg.tokenOut,
+                s.requester,
+                boltOperator,
+                swapID,
+                LockTypes.PENDING_REWARD
+            );
+            _lockStake(
+                fees[uint(BoltActors.RELAYER)],
+                s.nonce,
+                getRouteID(s.route),
+                s.srcMsg.tokenOut,
+                s.requester,
+                boltRelayerAddr,
+                swapID,
+                LockTypes.PENDING_REWARD
+            );
+            _lockStake(
+                fees[uint(BoltActors.PROTOCOL)],
+                s.nonce,
+                getRouteID(s.route),
+                s.srcMsg.tokenOut,
+                s.requester,
+                PROTOCOL_FEE_RECIPIENT,
+                swapID,
+                LockTypes.PENDING_REWARD
+            );
+        }
     }
 
     // TODO

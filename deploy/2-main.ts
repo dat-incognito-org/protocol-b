@@ -1,6 +1,5 @@
 import { HardhatRuntimeEnvironment } from 'hardhat/types';
 import { DeployFunction } from 'hardhat-deploy/types';
-import { parseEther } from 'ethers/lib/utils';
 
 const devSystemParameters = [[0, 5000, 1000], [0, 1000, 20000], ['1000000', '1000000', '1000000'], [500, 600, 700], [100, 20, 10, 5, 5]];
 
@@ -13,7 +12,7 @@ const deployFn: DeployFunction = async function(hre: HardhatRuntimeEnvironment) 
 
     await deploy('Main', {
         from: deployer,
-        args: ['0x0000000000000000000000000000000000001000', 0, p.address],
+        args: [0, p.address, '0x0000000000000000000000000000000000001000'],
         log: true,
         autoMine: true, // speed up deployment on local network (ganache, hardhat), no effect on live networks
     });

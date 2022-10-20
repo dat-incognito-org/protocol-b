@@ -35,8 +35,9 @@ abstract contract MainStructs {
         REFUNDED
     }
 
-    enum StakeLockTypes {
+    enum LockTypes {
         SWAP_LOCK,
+        PENDING_REWARD,
         UNSTAKE
     }
 
@@ -81,22 +82,24 @@ abstract contract MainStructs {
 
     struct LockedFunds {
         uint amount;
-        uint until;
-        bytes32 h; // the swap ID this is locked for
-        StakeLockTypes lockType;
+        uint nonce;
+        uint routeID;
+        address token;
+        address depositor;
+        address receiver;
+        bytes32 swapID;
+        // uint until;
+        // bytes32 h; // the swap ID this is locked for
+        LockTypes lockType;
     }
 
     struct StakedFunds {
-        uint amount;
-        LockedFunds[] locked;
-    }
-
-    struct MultiTokenStakedFunds {
-        mapping(address => StakedFunds) stake;
+        mapping(address => uint) stakeByToken;
+        mapping(address => uint) totalLockedByToken;
     }
 
     struct BoltRelayer {
-        mapping(uint => MultiTokenStakedFunds) stakeMap;
+        mapping(uint => StakedFunds) stakesByRoute;
         uint unstakeEnableBlock;
         bytes[] extraAddresses; // placeholder
     }

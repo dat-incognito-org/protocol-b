@@ -1,6 +1,6 @@
 {
   "scripts": {
-    "test": "npx hardhat test"
+    "test": "npx hardhat test --deploy-fixture"
   },
   "dependencies": {
     "hardhat": "^2.11.2"
