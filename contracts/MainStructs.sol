@@ -57,20 +57,20 @@ abstract contract MainStructs {
     }
 
     struct SwapData {
+        uint nonce;
         address requester;
         address boltRelayerAddr;
         Route route;
-        uint nonce;
         uint crossAmount;
         uint totalFees;
+        // uint startBlock;
         ExecutableMessage srcMsg;
         ExecutableMessage dstMsg;
-        uint startBlock;
         Status status;
     }
 
     struct FulfillData {
-        SwapData swapData;
+        bytes32 swapID;
         uint startBlock;
         address boltOperator;
     }

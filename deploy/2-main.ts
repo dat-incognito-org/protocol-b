@@ -1,8 +1,6 @@
 import { HardhatRuntimeEnvironment } from 'hardhat/types';
 import { DeployFunction } from 'hardhat-deploy/types';
 
-const devSystemParameters = [[0, 5000, 1000], [0, 1000, 20000], ['1000000', '1000000', '1000000'], [500, 600, 700], [100, 20, 10, 5, 5]];
-
 const deployFn: DeployFunction = async function(hre: HardhatRuntimeEnvironment) {
     const { deployments, getNamedAccounts } = hre;
     const { deploy } = deployments;

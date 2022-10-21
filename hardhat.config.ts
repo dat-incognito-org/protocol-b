@@ -33,6 +33,11 @@ const config: HardhatUserConfig = {
       },
       chainId: 31337,
     },
+    localhost: {
+      accounts: {
+          mnemonic: devMnemonic
+      }
+    },
     goerli: {
       url: `https://eth-goerli.g.alchemy.com/v2/${nodeApiKey}`,
       accounts: {
@@ -43,6 +48,12 @@ const config: HardhatUserConfig = {
       url: `https://polygon-mumbai.g.alchemy.com/v2/${nodeApiKey}`,
       accounts: {
           mnemonic: devMnemonic
+      },
+      verify: {
+        etherscan: {
+          apiUrl: 'https://api-testnet.polygonscan.com/',
+          apiKey: '...'
+        }
       }
     }
   },

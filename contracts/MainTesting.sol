@@ -6,10 +6,7 @@ import "./Main.sol";
 contract MainTestDst is Main {
     constructor(
         Networks _net,
-        address _params
-    ) Main(_net, _params, NATIVE_TOKEN_ADDRESS) {}
-
-    function newRoute(Networks src, Networks dst) public pure returns (Route memory) {
-        return Route(src, dst);
-    }
+        address _params,
+        address _feeRecipient
+    ) Main(_net, _params, _feeRecipient) {}
 }

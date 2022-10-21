@@ -43,8 +43,11 @@ interface IMain {
     ) external;
 
     function slash(
-        bytes[2] calldata signatures,
-        MainStructs.FulfillData calldata ts
+        MainStructs.SlashRules rule,
+        MainStructs.SwapData calldata s,
+        address boltOperator,
+        address boltRelayerAddr,
+        bytes calldata signature
     ) external;
 
     function getAvailableRelayers(
@@ -76,6 +79,23 @@ interface IMain {
         address boltOperator,
         address boltRelayer,
         uint route,
+        bytes32 swapID
+    );
+    event Lock(
+        MainStructs.LockTypes lockType,
+        uint amount,
+        uint nonce,
+        uint routeID,
+        address token,
+        address depositor,
+        address receiver,
+        bytes32 swapID
+    );
+    event Slash(
+        MainStructs.SlashRules rule,
+        uint amount,
+        address token,
+        address boltRelayerAddress,
         bytes32 swapID
     );
 }

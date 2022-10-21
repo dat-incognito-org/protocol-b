@@ -33,11 +33,11 @@ contract Main is IMain, MainStructs {
     constructor(
         Networks _net,
         address _params,
-        address feeRecipient
+        address _feeRecipient
     ) {
         CURRENT_NETWORK = _net;
         params = IParameters(_params);
-        PROTOCOL_FEE_RECIPIENT = feeRecipient;
+        PROTOCOL_FEE_RECIPIENT = _feeRecipient;
     }
 
     /// @notice Any relayer can add stake to take swap requests & earn fees;
@@ -88,14 +88,15 @@ contract Main is IMain, MainStructs {
         address token
     ) external {
         BoltRelayer storage r = boltRelayers[msg.sender];
-        uint stakedAmount = r.stakesByRoute[getRouteID(route)].stakeByToken[
-            token
-        ];
+        StakedFunds storage sf = r.stakesByRoute[getRouteID(route)];
+        uint stakedAmount = sf.stakeByToken[token];
+        uint lockedAmount = sf.totalLockedByToken[token];
         require(
             block.number >= r.unstakeEnableBlock,
             "first unstake time not met"
         );
-        require(stakedAmount > 0, "unstake zero");
+        require(stakedAmount > 0 && stakedAmount > lockedAmount, "unstake zero");
+        require(amount <= stakedAmount - lockedAmount, "unstake exceeds amount");
 
         swapCounter.increment();
         uint unlockTime = _lockStake(
@@ -186,15 +187,14 @@ contract Main is IMain, MainStructs {
             swapCounter.increment();
             // store new swap data
             newSwapData = SwapData(
+                swapCounter.current(),
                 msg.sender,
                 boltRelayerAddr,
                 route,
-                swapCounter.current(),
                 crossAmount,
                 totalFees,
                 srcMsg,
                 dstMsg,
-                block.number,
                 Status.WAITING
             );
         }
@@ -214,9 +214,15 @@ contract Main is IMain, MainStructs {
     }
 
     function computeSwapID(SwapData memory s) public pure returns (bytes32) {
-        require(s.status == Status.WAITING, "swap status invalid for hashing");
-        bytes memory content = abi.encode(s); // TODO: non-EVM-specific marshalling
+        // require(s.status == Status.WAITING, "swap status invalid for hashing");
+        (bytes32 temp1, bytes32 temp2) = (getMsgHash(s.srcMsg), getMsgHash(s.dstMsg));
+        temp1 = keccak256(abi.encodePacked(temp1, temp2));
+        bytes memory content = abi.encodePacked(s.nonce, s.requester, s.boltRelayerAddr, getRouteID(s.route), s.crossAmount, s.totalFees, temp1); // TODO: non-EVM-specific marshalling
         return keccak256(content);
+    }
+
+    function getMsgHash(ExecutableMessage memory m) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(m.tokenIn, m.tokenOut, m.callAddress, m.callData));
     }
 
     function _lockStake(
@@ -265,6 +271,11 @@ contract Main is IMain, MainStructs {
         );
 
         lockedFunds[mapkey] = unlockTime;
+        emit Lock(ltype, amount, nonce, routeID,
+                token,
+                depositor,
+                raddr,
+                h);
         return unlockTime;
     }
 
@@ -465,7 +476,7 @@ contract Main is IMain, MainStructs {
         ];
         uint l = sf.totalLockedByToken[token];
         uint s = sf.stakeByToken[token];
-        require(l < s, "invalid stake & locked amounts");
+        require(l <= s, "invalid stake & locked amounts");
         return s - l;
     }
 
@@ -501,20 +512,27 @@ contract Main is IMain, MainStructs {
         payable
     {
         (bytes32 h, FulfillData memory f) = _fulfill(s, boltOperator);
+        FulfillData storage temp = fulfills[h];
+        require(
+            temp.boltOperator == address(0),
+            "fulfill already exists"
+        );
         fulfills[h] = f;
+        swaps[h] = s;
     }
 
     function _fulfill(SwapData calldata s, address boltOperator)
         internal
         returns (bytes32, FulfillData memory)
     {
-        FulfillData memory fdata = FulfillData(s, block.number, boltOperator);
+        bytes32 h = computeSwapID(s);
+        FulfillData memory fdata = FulfillData(h, block.number, boltOperator);
         require(
-            fdata.swapData.route.dst == CURRENT_NETWORK,
+            s.route.dst == CURRENT_NETWORK,
             "fulfill dstNetwork invalid"
         );
-        uint crossAmount = fdata.swapData.crossAmount;
-        address crossToken = fdata.swapData.dstMsg.tokenIn;
+        uint crossAmount = s.crossAmount;
+        address crossToken = s.dstMsg.tokenIn;
         if (crossToken == NATIVE_TOKEN_ADDRESS) {
             require(crossAmount == msg.value, "fulfill native amount invalid");
         } else {
@@ -525,12 +543,11 @@ contract Main is IMain, MainStructs {
                 crossAmount
             );
         }
-        bytes32 h = computeSwapID(fdata.swapData);
 
         emit Fulfill(
             boltOperator,
-            fdata.swapData.boltRelayerAddr,
-            getRouteID(fdata.swapData.route),
+            s.boltRelayerAddr,
+            getRouteID(s.route),
             h
         );
         return (h, fdata);
@@ -543,7 +560,7 @@ contract Main is IMain, MainStructs {
         bytes calldata signature
     ) external {
         FulfillData memory f = fulfills[swapID];
-        _relay(swapID, f, boltOperator, boltRelayerAddr, signature);
+        _relay(f, boltOperator, boltRelayerAddr, signature);
     }
 
     function fulfillAndRelay(
@@ -554,19 +571,20 @@ contract Main is IMain, MainStructs {
     ) external payable {
         (bytes32 h, FulfillData memory f) = _fulfill(s, boltOperator);
         fulfills[h] = f; // unoptimized storage
-        _relay(h, f, boltOperator, boltRelayerAddr, signature);
+        swaps[h] = s;
+        _relay(f, boltOperator, boltRelayerAddr, signature);
     }
 
     function _relay(
-        bytes32 swapID,
         FulfillData memory f,
         address boltOperator,
         address boltRelayerAddr,
         bytes calldata signature
     ) internal {
+        SwapData memory swapData = swaps[f.swapID];
         // check f exists (and is non-zero)
         require(
-            f.swapData.status != Status.INVALID && f.boltOperator != address(0),
+            swapData.status != Status.INVALID && f.boltOperator != address(0),
             "fulfill non-existent"
         );
         // check operator address matches
@@ -578,20 +596,20 @@ contract Main is IMain, MainStructs {
         );
         // verify signature
         bytes32 signedContent = keccak256(
-            abi.encodePacked(RELAY_MESSAGE_PREFIX, swapID, boltOperator)
+            abi.encodePacked(RELAY_MESSAGE_PREFIX, f.swapID, boltOperator)
         );
         address recoveredAddress = ECDSA.recover(signedContent, signature);
         require(recoveredAddress == boltRelayerAddr, "relay signature invalid");
-        ExecutableMessage memory m = f.swapData.dstMsg;
-        _executeDstMsg(f.swapData.crossAmount, m);
+        ExecutableMessage memory m = swapData.dstMsg;
+        _executeDstMsg(swapData.crossAmount, m);
         _lockStake(
-            getLockAmount(f.swapData.crossAmount),
-            f.swapData.nonce,
-            getRouteID(f.swapData.route),
-            f.swapData.dstMsg.tokenIn,
+            getLockAmount(swapData.crossAmount),
+            swapData.nonce,
+            getRouteID(swapData.route),
+            swapData.dstMsg.tokenIn,
             f.boltOperator,
             boltRelayerAddr,
-            swapID,
+            f.swapID,
             LockTypes.SWAP_LOCK
         );
     }
@@ -604,14 +622,6 @@ contract Main is IMain, MainStructs {
         );
         _;
     }
-    modifier checkSanityFulfill(FulfillData memory f) {
-        require(f.swapData.status != Status.INVALID, "fulfill status invalid");
-        require(
-            f.boltOperator != address(0),
-            "fulfill operator address invalid"
-        );
-        _;
-    }
 
     function relayReturn(
         bytes32 swapID,
@@ -619,10 +629,10 @@ contract Main is IMain, MainStructs {
         address boltRelayerAddr,
         bytes calldata signature
     ) external {
-        SwapData memory s = swaps[swapID];
+        SwapData storage s = swaps[swapID];
 
         {
-            // check f exists (and is non-zero)
+            // check s exists (and is non-zero)
             require(
                 s.status != Status.INVALID &&
                     s.boltRelayerAddr != address(0) &&
@@ -644,6 +654,10 @@ contract Main is IMain, MainStructs {
         }
 
         {
+            // store fulfill data
+            FulfillData memory fdata = FulfillData(swapID, block.number, boltOperator);
+            fulfills[swapID] = fdata;
+
             // reset relayer's stake lock
             bytes32 mapkey = keccak256(
                 abi.encodePacked(
@@ -703,11 +717,81 @@ contract Main is IMain, MainStructs {
                 LockTypes.PENDING_REWARD
             );
         }
+        s.status = Status.FULFILLED;
     }
 
-    // TODO
-
-    function slash(bytes[2] calldata signatures, FulfillData calldata ts)
+    function slash(SlashRules rule, SwapData calldata s, address boltOperator,
+        address boltRelayerAddr, bytes calldata signature)
         external
-    {}
+    {
+        bytes32 h = computeSwapID(s);
+        // verify signature
+        bytes32 signedContent = keccak256(
+            abi.encodePacked(RELAY_MESSAGE_PREFIX, h, boltOperator)
+        );
+        address recoveredAddress = ECDSA.recover(signedContent, signature);
+        require(
+            recoveredAddress == boltRelayerAddr,
+            "slash: relay signature invalid"
+        );
+
+        uint amt;
+        address token;
+        if (rule == SlashRules.RULE1) {
+            (amt, token) = _slashRule1(h, s, boltRelayerAddr);
+        } else if (rule == SlashRules.RULE2) {
+            (amt, token) = _slashRule2(h, s, boltOperator, boltRelayerAddr);
+        } else {
+            revert("slash rule invalid");
+        }
+
+        // update stake balances
+        boltRelayers[boltRelayerAddr].stakesByRoute[getRouteID(s.route)].stakeByToken[token] -= amt;
+        boltRelayers[boltRelayerAddr].stakesByRoute[getRouteID(s.route)].totalLockedByToken[token] -= amt;
+
+        emit Slash(rule, amt, token, boltRelayerAddr, h);
+
+        // move funds
+        // will update
+        if (token == NATIVE_TOKEN_ADDRESS) {
+            TransferHelper.safeTransferETH(PROTOCOL_FEE_RECIPIENT, amt);
+        } else {
+            TransferHelper.safeTransfer(token, PROTOCOL_FEE_RECIPIENT, amt);
+        }
+    }
+
+    function _slashRule1(bytes32 swapID, SwapData calldata s, address boltRelayerAddr)
+        internal returns (uint, address)
+    {
+        require(
+            s.route.dst == CURRENT_NETWORK,
+            "SR1 fulfill dstNetwork invalid"
+        );
+        require(computeSwapID(s) == swapID, "invalid swap hash");
+        FulfillData memory f = fulfills[swapID];
+        SwapData memory swapState = swaps[swapID];
+        require(
+            swapState.status == Status.INVALID && f.boltOperator == address(0),
+            "SR1 fulfill exists"
+        );
+
+        // TODO: advance swap status
+
+        return (s.crossAmount, s.dstMsg.tokenIn);
+    }
+
+    function _slashRule2(bytes32 swapID, SwapData calldata s, address boltOperator, address boltRelayerAddr)
+        internal returns (uint, address)
+    {
+        require(
+            s.route.src == CURRENT_NETWORK,
+            "SR2 fulfill srcNetwork invalid"
+        );
+        FulfillData memory f = fulfills[swapID];
+        require(boltOperator != f.boltOperator, "SR2-OP");
+
+        // TODO: advance swap status
+
+        return (getLockAmount(s.crossAmount), s.srcMsg.tokenOut);
+    }
 }
